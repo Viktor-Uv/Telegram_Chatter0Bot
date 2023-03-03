@@ -53,12 +53,12 @@ def set_temperature(message):
 
 
 # Function to generate response using OpenAI API
-def generate_response(message, id):
+def generate_response(dialog, request, id):
     # Generate AI responce
     try:
         response = openai.Completion.create(
             engine="text-davinci-003",
-            prompt=message,
+            prompt=dialog + request,
             temperature=data[id]["Temp"],
             max_tokens=1024,
             top_p=1,
@@ -66,8 +66,7 @@ def generate_response(message, id):
             presence_penalty=0.5
         )
     except OpenAIError as e:
-        error_message = "Error occured: " + str(e)
-        return error_message
+        return f"OpenAI error...\nCode: {e.http_status}\nMessage: {e.user_message}\n{e.headers['Date']}"
 
     # Return AI generated reply
     return response.choices[0].text
@@ -121,36 +120,39 @@ def echo_message(message):
     id = str(message.chat.id)
     initialise(id, message)
     # Reply to the chat
-    dialog = build_dialog(message, id)
-    response = generate_response(dialog, str(message.chat.id))
-    bot.reply_to(message, response)
+    request = message.text + '\n'
+    dialog = data[id]["Dialog"]
+    response = generate_response(dialog, request, id)
+    try:
+        bot.reply_to(message, response)
+    except Exception as e:
+        print(bot.reply_to(message, f"Telegram Bot error...\nMessage: {e.args[0]}\n{e.result.headers['Date']}"))
     # Save dialog
-    dialog += shorten(response)
+    dialog += shorten(request) + shorten(response)
+    dialog = shorten_dialog(dialog)
     data[id]["Dialog"] = dialog
     # Update data file
     write_data()
 
 
 # Generate dialog of the MAX_DIALOG_SIZE from the past requests
-def build_dialog(message, id):
+def shorten_dialog(dialog):
     # Get the current dialog
-    dialog = data[id]["Dialog"].split('\n\n')
+    dialog = dialog.split('\n\n')
     if dialog == ['']:
-        return shorten(message.text) + '\n'
+        return ""
     # If the dialog size exceeds the maximum, remove the oldest request/response pair
-    if len(dialog) >= MAX_DIALOG_SIZE:
+    if len(dialog) > MAX_DIALOG_SIZE:
         dialog.pop(0)
-    # Add the new request
-    dialog.append(shorten(message.text))
-    # Generate the response
+    # Concatenate response
     dialog = '\n\n'.join(dialog)
-    return dialog + '\n'
+    return dialog + '\n\n'
 
 
 def shorten(text):
     shortened = ""
     for i in range(len(text)):
-        if i > MIN_CHARACTERS and text[i] in ['.', '?', '!']:
+        if i > MIN_CHARACTERS and text[i] in ['.', '?', '!', '\n']:
             shortened += text[i]
             break
         else:
