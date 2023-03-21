@@ -1,4 +1,4 @@
-import openai, telebot, json
+import openai, telebot, json, time, requests
 from openai.error import OpenAIError
 
 # Set up Telegram Bot credentials
@@ -6,9 +6,13 @@ bot = telebot.TeleBot("5915763807:AAGEed0Vh--bSqpuiNqO3BoiwIg24xH9OI0")
 # Set up OpenAI API credentials
 openai.api_key = "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"
 # Define default parameters
-DEF_TEMP = 0.5
+DEF_TEMP = 1
+MAX_TEMP = 2
 MAX_DIALOG_SIZE = 5
 MIN_CHARACTERS = 250
+SMALL = "256x256"
+MEDIUM = "512x512"
+BIG = "1024x1024"
 # Load existing user data from file
 try:
     # Read the JSON object
@@ -16,7 +20,8 @@ try:
         data = json.load(f)
 except FileNotFoundError:
     data = {}
-
+time_now = time.gmtime()
+print("Start time:", time.strftime("%a, %d-%b-%Y %H:%M UTC", time_now))
 
 def write_data():
     with open('data.json', 'w') as f:
@@ -35,41 +40,77 @@ def set_temperature(message):
     else:
         # Extract parameter from the message
         try:
-            data[id]["Temp"] = float(message.text.split()[1])
+            temp = float(message.text.split()[1])
         except:
             # Remind proper usage example
-            bot.reply_to(message, """Usage: "/temp temperature" (0 to 1)""")
+            bot.reply_to(message, f"""Usage: "/temp temperature" (0 to {MAX_TEMP})""")
             return
-        temp = data[id]["Temp"]
         # Check usage
-        if temp >= 0 and temp <= 1:
+        if temp >= 0 and temp <= MAX_TEMP:
             # Indicate success
+            data[id]["Temp"] = temp
             bot.reply_to(message, f"""Parameter "temperature" is now set to {temp}""")
         else:
             # Indicate usage error
-            bot.reply_to(message, """Usage: "/temp temperature" (number from 0 to 1)""")
+            bot.reply_to(message, f"""Usage: "/temp temperature" (0 to {MAX_TEMP})""")
     # Update data file
     write_data()
+
+
+@bot.message_handler(commands=['imagine'])
+def image_generation(message):
+    # Take ID of a person and initialise, then increment the request count
+    id = str(message.from_user.id)
+    initialise(id, message)
+    data[id]["AI_Requests"] += 1
+    # If empty parameter given - show usage instructions
+    if len(message.text.split()) == 1:
+        bot.reply_to(message, """Usage: "/imagine description".""")
+    else:
+        # Remove '/imagine' from the message
+        try:
+            request = ' '.join(message.text.split()[1:])
+        except:
+            # Show usage instructions
+            bot.reply_to(message, """Usage: "/imagine description".""")
+            return
+        try:
+            response = openai.Image.create(
+                prompt=request,
+                n=1,
+                size=MEDIUM
+                )
+            image_url = response['data'][0]['url']
+            # Download the image from the URL
+            image_content = requests.get(image_url).content
+            # Send it to chat
+            bot.send_photo(chat_id=message.chat.id, photo=image_content, reply_to_message_id=message.message_id)
+            # Update data file
+            write_data()
+        except OpenAIError as e:
+            bot.reply_to(message, f"OpenAI error...\nCode: {e.http_status}\nMessage: {e.user_message}\n{e.headers['Date']}")
+            return
 
 
 # Function to generate response using OpenAI API
 def generate_response(dialog, request, id):
     # Generate AI responce
+    knowledge_cutoff = "Up to Sep 2021"
+    time_now = time.gmtime()
+    current_time = time.strftime("%a, %d-%b-%Y %H:%M UTC", time_now)
+    system_msg = [{"role": "system", "content": f"Your name is Chatter. You are a friendly Telegram bot. You were created by Viktor Uvarchev. You generate text using OpenAI API. Knowledge cutoff: {knowledge_cutoff}. Current date and time: {current_time}. You can generate text when user talks to you and generate images when user sends /imagine command, suggest to use '/help' for list of commands"}]
     try:
-        response = openai.Completion.create(
-            engine="text-davinci-003",
-            prompt=dialog + request,
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=system_msg + dialog + request,
             temperature=data[id]["Temp"],
-            max_tokens=1024,
-            top_p=1,
-            frequency_penalty=0.0,
-            presence_penalty=0.5
+            max_tokens=1024
         )
     except OpenAIError as e:
         return f"OpenAI error...\nCode: {e.http_status}\nMessage: {e.user_message}\n{e.headers['Date']}"
 
     # Return AI generated reply
-    return response.choices[0].text
+    return response["choices"][0]["message"]["content"]
 
 
 # Clears bot's memory
@@ -77,7 +118,7 @@ def generate_response(dialog, request, id):
 def send_welcome(message):
     # Take ID of a group or person
     id = str(message.chat.id)
-    data[id]["Dialog"] = ""
+    data[id]["Dialog"] = []
     bot.reply_to(message, "Memory erased.")
     # Update data file
     write_data()
@@ -102,9 +143,10 @@ def greet_user(message):
 def help_user(message):
     # Print brief help
     bot.reply_to(message, f"""Reply to my message with any text to get an AI response\n
-Use "/temp number" to set the "temperature" (between 0 and 1, default {DEF_TEMP}). """ + \
+Use "/temp number" to set the "temperature" (between 0 and {MAX_TEMP}, default is {DEF_TEMP}). """ + \
 """Higher values will make the output more random, while lower values will make it more """ + \
 """focused and deterministic. Using without parameter will display the "temperature" currently set\n
+Use "/imagine description" to get an AI generated image\n
 Use "/clear" to clear Bot's memory\n
 Use "/start" for a welcome message\n
 Use "/hello" to be greeted""")
@@ -120,7 +162,7 @@ def echo_message(message):
     id = str(message.chat.id)
     initialise(id, message)
     # Reply to the chat
-    request = message.text + '\n'
+    request = [{"role": "user", "content": message.text}]
     dialog = data[id]["Dialog"]
     response = generate_response(dialog, request, id)
     try:
@@ -128,7 +170,8 @@ def echo_message(message):
     except Exception as e:
         print(bot.reply_to(message, f"Telegram Bot error...\nMessage: {e.args[0]}\n{e.result.headers['Date']}"))
     # Save dialog
-    dialog += shorten(request) + shorten(response)
+    dialog += [{"role": "user", "content": shorten(message.text)},
+               {"role": "assistant", "content": shorten(response)}]
     dialog = shorten_dialog(dialog)
     data[id]["Dialog"] = dialog
     # Update data file
@@ -137,16 +180,12 @@ def echo_message(message):
 
 # Generate dialog of the MAX_DIALOG_SIZE from the past requests
 def shorten_dialog(dialog):
-    # Get the current dialog
-    dialog = dialog.split('\n\n')
-    if dialog == ['']:
-        return ""
     # If the dialog size exceeds the maximum, remove the oldest request/response pair
-    if len(dialog) > MAX_DIALOG_SIZE:
+    if len(dialog) > MAX_DIALOG_SIZE * 2:
+        dialog.pop(0)
         dialog.pop(0)
     # Concatenate response
-    dialog = '\n\n'.join(dialog)
-    return dialog + '\n\n'
+    return dialog
 
 
 def shorten(text):
@@ -167,7 +206,7 @@ def initialise(id, message):
             data[id] = {
                 "User_name": message.from_user.full_name,
                 "Nick": "" if nickname is None else nickname,
-                "Dialog": "",
+                "Dialog": [],
                 "Temp": DEF_TEMP,
                 "AI_Requests": 0
             }
@@ -175,9 +214,12 @@ def initialise(id, message):
             chat_info = bot.get_chat(id)
             data[id] = {
                 "Group_name": chat_info.title,
-                "Dialog": "",
+                "Dialog": [],
                 "Temp": DEF_TEMP
             }
 
 
-bot.polling()
+try:
+    bot.infinity_polling()
+except Exception as e:
+    print(e)
